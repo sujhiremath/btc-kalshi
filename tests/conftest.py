@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterator, List
 
 import pytest
+import pytest_asyncio
 
 from btc_kalshi.config.settings import get_settings
 from btc_kalshi.db.sqlite_manager import SQLiteStateManager
@@ -97,7 +98,7 @@ def make_bars():
     return _make_bars_helper
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def state_manager() -> SQLiteStateManager:
     """
     Provide an in-memory SQLiteStateManager for tests.
