@@ -283,7 +283,7 @@ class SQLiteStateManager:
                 opened_ts,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position_id,
@@ -468,7 +468,7 @@ class SQLiteStateManager:
                 created_ts,
                 last_update_ts
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -595,6 +595,30 @@ class SQLiteStateManager:
         ) as cursor:
             rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+    async def count_contract_entries_today(
+        self,
+        mode: str,
+        contract_id: str,
+        trading_date: str,
+    ) -> int:
+        """
+        Count entry orders for the given contract on the given trading date.
+        Used for re-entry cap (e.g. max 2 per contract per day).
+        """
+        if not trading_date:
+            return 0
+        like_pattern = f"{trading_date}%"
+        async with self._conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE mode = ? AND contract_id = ? AND purpose = 'entry' AND created_ts LIKE ?
+            """,
+            (mode, contract_id, like_pattern),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["cnt"]) if row is not None else 0
 
     async def close(self) -> None:
         await self._conn.close()
