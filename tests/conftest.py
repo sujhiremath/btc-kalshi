@@ -87,6 +87,8 @@ def make_bars(
 
 # Alias so the fixture can be named make_bars and return the helper
 _make_bars_helper = make_bars
+# For use in test helpers that need to build bars without the fixture
+make_bars_fn = make_bars
 
 
 @pytest.fixture()
