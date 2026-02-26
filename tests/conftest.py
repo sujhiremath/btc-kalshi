@@ -4,6 +4,7 @@ from typing import Iterator
 import pytest
 
 from btc_kalshi.config.settings import get_settings
+from btc_kalshi.db.sqlite_manager import SQLiteStateManager
 
 
 @pytest.fixture(autouse=True)
@@ -52,3 +53,15 @@ def ensure_log_dir(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The logger module will create data/logs relative to CWD.
     monkeypatch.chdir(tmp_path)
     os.makedirs("data/logs", exist_ok=True)
+
+
+@pytest.fixture()
+async def state_manager() -> SQLiteStateManager:
+    """
+    Provide an in-memory SQLiteStateManager for tests.
+    """
+    manager = await SQLiteStateManager.init(":memory:")
+    try:
+        yield manager
+    finally:
+        await manager.close()
