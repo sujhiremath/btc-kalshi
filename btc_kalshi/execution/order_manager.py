@@ -6,8 +6,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from btc_kalshi.core.constants import (
+    ENTRY_REPRICE_OFFSET,
+    ENTRY_WAIT_SECONDS,
+    MIN_FILL_PCT,
+    REPRICE_AFTER_SECONDS,
+)
 from btc_kalshi.core.logger import get_logger
 
 AMBIGUOUS_WAIT_SECONDS = 5
@@ -22,6 +28,16 @@ def generate_client_order_id(
     """Format: {mode}-{contract_id}-{ts_int}-{side}."""
     ts_int = int(signal_ts.timestamp() * 1000)
     return f"{mode}-{contract_id}-{ts_int}-{side}"
+
+
+def _best_ask_from_orderbook(ob: Any) -> float:
+    """Best ask in decimal (e.g. 0.52). Orderbook asks: list of dicts with price in cents or list [price, qty]."""
+    asks = ob.get("asks") or [] if isinstance(ob, dict) else []
+    if not asks:
+        return 1.0
+    first = asks[0]
+    p = first.get("price") if isinstance(first, dict) else (first[0] if isinstance(first, (list, tuple)) else first)
+    return float(p) / 100.0
 
 
 def _order_id_from_response(resp: Any) -> Optional[str]:
@@ -46,11 +62,13 @@ class OrderManager:
         sqlite_manager: Any,
         event_logger: Optional[Any] = None,
         mode: str = "live",
+        get_now: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._exchange = exchange
         self._db = sqlite_manager
         self._event_logger = event_logger
         self._mode = mode
+        self._get_now = get_now or (lambda: datetime.now(timezone.utc))
         self._logger = get_logger("order-manager")
 
     async def place_entry_order(self, signal: Any, size: int) -> Optional[dict[str, Any]]:
@@ -158,3 +176,104 @@ class OrderManager:
     async def get_order_status(self, client_order_id: str) -> Optional[dict[str, Any]]:
         """Get order status from exchange by client_order_id."""
         return await self._exchange.get_order(client_order_id)
+
+    def _parse_created_ts(self, created_ts: Optional[str]) -> datetime:
+        if not created_ts:
+            return datetime.now(timezone.utc)
+        s = created_ts.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            return datetime.now(timezone.utc)
+
+    async def monitor_entry_fill(self, client_order_id: str) -> dict[str, Any]:
+        """
+        Phase 1 (0-45s): poll at initial price. Phase 2 (45-90s): reprice once to ask+2¢.
+        Phase 3 (90s+): cancel, soft block. Partial >=60% accept, <60% cancel+optional top-up.
+        """
+        now = self._get_now()
+        row = await self._db.get_order(client_order_id=client_order_id, mode=self._mode)
+        if not row:
+            return {"outcome": "error", "reason": "order_not_found"}
+
+        contract_id = row.get("contract_id") or ""
+        intended_size = int(row.get("intended_size") or 0)
+        side = row.get("side") or "YES"
+        created_ts = self._parse_created_ts(row.get("created_ts"))
+        elapsed = (now - created_ts).total_seconds()
+
+        ex_order = await self._exchange.get_order(client_order_id)
+        if not ex_order:
+            return {"outcome": "pending", "elapsed": elapsed}
+
+        o = ex_order.get("order") if isinstance(ex_order.get("order"), dict) else ex_order
+        if not isinstance(o, dict):
+            return {"outcome": "pending", "elapsed": elapsed}
+
+        status = (o.get("status") or o.get("current_status") or "").lower()
+        filled = int(o.get("filled_count") or o.get("filled_size") or 0)
+        if intended_size <= 0:
+            intended_size = int(o.get("count") or 1)
+
+        # Full fill
+        if status == "filled" or filled >= intended_size:
+            await self._db.update_order(
+                client_order_id, mode=self._mode,
+                current_status="filled", filled_size=filled,
+            )
+            return {"outcome": "filled", "filled_size": filled}
+
+        # Partial fill: >=60% accept
+        if filled >= intended_size * MIN_FILL_PCT:
+            await self._db.update_order(
+                client_order_id, mode=self._mode,
+                current_status="filled", filled_size=filled,
+            )
+            return {"outcome": "filled", "filled_size": filled}
+
+        # Partial fill <60%: cancel + optional top-up
+        if filled > 0 and filled < intended_size * MIN_FILL_PCT:
+            await self.cancel_order(client_order_id)
+            remaining = intended_size - filled
+            top_up_placed = False
+            if remaining > 0 and hasattr(self._exchange, "get_orderbook"):
+                ob = await self._exchange.get_orderbook(contract_id)
+                best_ask = _best_ask_from_orderbook(ob)
+                new_price_cents = int(round((best_ask + ENTRY_REPRICE_OFFSET) * 100))
+                await self._exchange.place_order(
+                    contract_id=contract_id,
+                    side=side,
+                    count=remaining,
+                    price_cents=new_price_cents,
+                    client_order_id=client_order_id + "-topup",
+                )
+                top_up_placed = True
+            return {
+                "outcome": "cancelled",
+                "partial_fill_size": filled,
+                "top_up_placed": top_up_placed,
+            }
+
+        # Phase 3: 90s+ cancel, soft block
+        if elapsed >= ENTRY_WAIT_SECONDS:
+            await self.cancel_order(client_order_id)
+            return {"outcome": "cancelled", "soft_block": True}
+
+        # Phase 2: 45-90s reprice once (ask+2¢)
+        if elapsed >= REPRICE_AFTER_SECONDS:
+            ob = await self._exchange.get_orderbook(contract_id)
+            best_ask = _best_ask_from_orderbook(ob)
+            new_price_cents = int(round((best_ask + ENTRY_REPRICE_OFFSET) * 100))
+            await self.cancel_order(client_order_id)
+            await self._exchange.place_order(
+                contract_id=contract_id,
+                side=side,
+                count=intended_size,
+                price_cents=new_price_cents,
+                client_order_id=client_order_id,
+            )
+            now_iso = self._get_now().isoformat()
+            await self._db.update_order(client_order_id, mode=self._mode, created_ts=now_iso)
+            return {"outcome": "repriced"}
+
+        return {"outcome": "pending", "elapsed": elapsed}
