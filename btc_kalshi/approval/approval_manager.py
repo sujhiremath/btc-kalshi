@@ -31,6 +31,10 @@ class ApprovalManager:
         self._pending: Dict[str, asyncio.Future] = {}
         self._timeout_seconds = APPROVAL_TIMEOUT_SECONDS
 
+    def get_pending_approval_ids(self) -> list[str]:
+        """Return list of approval_ids currently waiting for operator decision (for dashboard)."""
+        return list(self._pending.keys())
+
     def receive_approval(self, approval_id: str, approved: bool) -> None:
         """Record operator decision for the given approval_id."""
         if not approval_id:

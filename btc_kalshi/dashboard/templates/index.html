@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC-Kalshi Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --card: #1a1a1f;
+      --text: #e8e8ec;
+      --muted: #888;
+      --live: #22c55e;
+      --paper: #3b82f6;
+      --killed: #ef4444;
+      --armed: #eab308;
+      --disarmed: #64748b;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1rem; }
+    .banner { padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-weight: 600; text-align: center; }
+    .banner.live-active { background: rgba(34,197,94,0.2); color: var(--live); }
+    .banner.live-armed { background: rgba(234,179,8,0.2); color: var(--armed); }
+    .banner.live-killed { background: rgba(239,68,68,0.2); color: var(--killed); }
+    .banner.live-disarmed { background: rgba(100,116,139,0.2); color: var(--disarmed); }
+    .banner.paper-active { background: rgba(59,130,246,0.2); color: var(--paper); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .card { background: var(--card); border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+    .card h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #2a2a30; }
+    .btc-price { font-size: 1.5rem; font-weight: 700; color: var(--live); }
+    .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 1rem; }
+    .controls button { padding: 0.5rem 1rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; }
+    .btn-arm { background: var(--armed); color: #000; }
+    .btn-disarm { background: var(--disarmed); color: #fff; }
+    .btn-kill { background: var(--killed); color: #fff; }
+    .btn-resume { background: var(--live); color: #000; }
+    .signal-log { max-height: 200px; overflow-y: auto; font-size: 0.8rem; }
+    .signal-log pre { margin: 0.2rem 0; }
+    .pending-approval { background: rgba(234,179,8,0.15); border: 1px solid var(--armed); border-radius: 8px; padding: 0.75rem; margin-top: 0.5rem; }
+    .pending-approval button { margin-right: 0.5rem; margin-top: 0.25rem; }
+  </style>
+</head>
+<body>
+  <div id="state-banner" class="banner live-disarmed">Loading…</div>
+
+  <div class="card">
+    <h3>BTC price</h3>
+    <div id="btc-price" class="btc-price">—</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Live positions</h3>
+      <div id="live-positions"><table><tbody></tbody></table></div>
+    </div>
+    <div class="card">
+      <h3>Paper positions</h3>
+      <div id="paper-positions"><table><tbody></tbody></table></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Today's stats — Live</h3>
+      <div id="live-stats">—</div>
+    </div>
+    <div class="card">
+      <h3>Today's stats — Paper</h3>
+      <div id="paper-stats">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Signal log (last 10)</h3>
+    <div id="signal-log" class="signal-log">—</div>
+  </div>
+
+  <div class="card">
+    <h3>Controls</h3>
+    <div class="controls">
+      <button class="btn-arm" id="btn-arm">Arm</button>
+      <button class="btn-disarm" id="btn-disarm">Disarm</button>
+      <button class="btn-kill" id="btn-kill">Kill</button>
+      <button class="btn-resume" id="btn-resume">Resume</button>
+    </div>
+  </div>
+
+  <div class="card" id="pending-card" style="display: none;">
+    <h3>Pending approval</h3>
+    <div id="pending-approvals"></div>
+  </div>
+
+  <script>
+    const REFRESH_MS = 5000;
+
+    function setBanner(live, paper) {
+      const el = document.getElementById('state-banner');
+      const s = (live && live.lifecycle_state) ? String(live.lifecycle_state) : 'DISARMED';
+      el.textContent = 'Live: ' + s + '  |  Paper: ' + (paper && paper.lifecycle_state ? paper.lifecycle_state : '—');
+      el.className = 'banner live-' + (s === 'ACTIVE' ? 'active' : s === 'ARMED' ? 'armed' : s === 'KILLED' ? 'killed' : 'disarmed');
+    }
+
+    function renderPositions(selector, positions) {
+      const tbody = document.querySelector(selector + ' table tbody');
+      if (!positions || positions.length === 0) { tbody.innerHTML = '<tr><td>No positions</td></tr>'; return; }
+      tbody.innerHTML = positions.map(p => 
+        '<tr><td>' + (p.contract_id || p.ticker || '') + '</td><td>' + (p.filled_size ?? p.position ?? '') + '</td><td>' + (p.side || '') + '</td></tr>'
+      ).join('');
+    }
+
+    function renderStats(selector, data) {
+      const el = document.getElementById(selector);
+      if (!data) { el.textContent = '—'; return; }
+      el.innerHTML = 'P&L net: ' + (data.daily_pnl_net != null ? data.daily_pnl_net : '—') + ' &nbsp; Gross: ' + (data.daily_pnl_gross != null ? data.daily_pnl_gross : '—');
+    }
+
+    function renderSignals(signals) {
+      const el = document.getElementById('signal-log');
+      if (!signals || signals.length === 0) { el.textContent = '—'; return; }
+      el.innerHTML = signals.map(s => '<pre>' + JSON.stringify(s) + '</pre>').join('');
+    }
+
+    function renderPending(ids) {
+      const card = document.getElementById('pending-card');
+      const container = document.getElementById('pending-approvals');
+      if (!ids || ids.length === 0) { card.style.display = 'none'; return; }
+      card.style.display = 'block';
+      container.innerHTML = ids.map(id =>
+        '<div class="pending-approval">Approval ID: ' + id +
+        ' <button class="btn-arm" onclick="approve(\'' + id + '\')">Approve</button>' +
+        ' <button class="btn-kill" onclick="reject(\'' + id + '\')">Reject</button></div>'
+      ).join('');
+    }
+
+    async function refresh() {
+      try {
+        const [statusRes, posRes, sigRes] = await Promise.all([
+          fetch('/api/status'),
+          fetch('/api/positions?mode=all'),
+          fetch('/api/signals')
+        ]);
+        const status = await statusRes.json();
+        const positions = await posRes.json();
+        const signals = await sigRes.json();
+
+        setBanner(status.live, status.paper);
+        document.getElementById('btc-price').textContent = status.btc_price != null ? '$' + Number(status.btc_price).toLocaleString() : '—';
+        renderPositions('#live-positions', Array.isArray(positions) ? positions.filter(p => p.mode === 'live') : []);
+        renderPositions('#paper-positions', Array.isArray(positions) ? positions.filter(p => p.mode === 'paper') : []);
+        renderStats('live-stats', status.live);
+        renderStats('paper-stats', status.paper);
+        renderSignals(signals);
+        renderPending(status.pending_approvals || []);
+      } catch (e) {
+        document.getElementById('state-banner').textContent = 'Error: ' + e.message;
+      }
+    }
+
+    async function post(path) {
+      const r = await fetch(path, { method: 'POST' });
+      if (r.ok) await refresh();
+    }
+    async function approve(id) { await post('/api/approve/' + encodeURIComponent(id)); }
+    async function reject(id) { await post('/api/reject/' + encodeURIComponent(id)); }
+
+    document.getElementById('btn-arm').onclick = () => post('/api/arm');
+    document.getElementById('btn-disarm').onclick = () => post('/api/disarm');
+    document.getElementById('btn-resume').onclick = () => post('/api/resume');
+    document.getElementById('btn-kill').onclick = () => {
+      if (confirm('Kill live trading? This will close positions and set state to KILLED.')) post('/api/kill');
+    };
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>
