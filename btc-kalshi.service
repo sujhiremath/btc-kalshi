@@ -1,0 +1,15 @@
+[Unit]
+Description=BTC-Kalshi trading bot (dual-path live + paper)
+After=network.target
+
+[Service]
+Type=simple
+User=btc
+WorkingDirectory=/opt/btc-kalshi
+ExecStart=/usr/bin/python -m btc_kalshi.main
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
