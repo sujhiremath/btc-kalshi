@@ -215,6 +215,41 @@ class EventLogger:
                     break
         return results
 
+    async def save_daily_report(
+        self,
+        report_date: str,
+        mode: str,
+        summary: Dict[str, Any],
+    ) -> None:
+        """Persist daily report to Postgres. Best-effort; failures are logged only."""
+        if self._pg_disabled or self._pool is None:
+            return
+        await self._ensure_pg()
+        if self._pg_disabled or self._pool is None:
+            return
+        try:
+            ts = self._now().isoformat()
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO daily_reports (report_date, mode, summary, generated_ts)
+                    VALUES ($1::date, $2, $3::jsonb, $4::timestamptz)
+                    ON CONFLICT (report_date) DO UPDATE SET
+                        mode = EXCLUDED.mode,
+                        summary = EXCLUDED.summary,
+                        generated_ts = EXCLUDED.generated_ts
+                    """,
+                    report_date,
+                    mode,
+                    json.dumps(summary),
+                    ts,
+                )
+        except Exception as exc:
+            self._logger.info(
+                "Failed to save daily report to Postgres",
+                extra={"report_date": report_date, "error": str(exc)},
+            )
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()
